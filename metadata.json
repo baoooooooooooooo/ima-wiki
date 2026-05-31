@@ -1,0 +1,6 @@
+{
+  "name": "IMa (잔디위키)",
+  "description": "LLM과의 대화를 조직의 기억으로 변환하는 Agent 기반 협업 시스템",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
