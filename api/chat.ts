@@ -7,13 +7,16 @@ export default async function handler(req: any, res: any) {
 
   try {
     const { message, history } = req.body;
-    const apiKey = process.env.GEMINI_API_KEY;
+    let apiKey = process.env.GEMINI_API_KEY;
+    const backupKey = process.env.GEMINI_API_KEY_BACKUP;
     
     if (!apiKey) {
-      return res.status(500).json({ error: "AI Studio 설정(좌측 열쇠 아이콘)에서 GEMINI_API_KEY를 입력해주세요." });
+      if (backupKey) {
+        apiKey = backupKey;
+      } else {
+        return res.status(500).json({ error: "AI Studio 설정(좌측 열쇠 아이콘)에서 GEMINI_API_KEY를 입력해주세요." });
+      }
     }
-
-    const ai = new GoogleGenAI({ apiKey });
 
     const formattedHistory = history.map((msg: any) => 
       `${msg.role === 'user' ? '사용자' : 'AI'}: ${msg.content}`
@@ -33,17 +36,41 @@ ${formattedHistory}
 사용자: ${message}
 AI:`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+    const generateWithKey = async (key: string) => {
+      const ai = new GoogleGenAI({ apiKey: key });
+      return await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+      });
+    };
 
-    res.status(200).json({ text: response.text });
+    try {
+      const response = await generateWithKey(apiKey);
+      return res.status(200).json({ text: response.text });
+    } catch (primaryError: any) {
+      const isQuotaError = primaryError.status === 429 || primaryError.message?.includes("429") || primaryError.message?.includes("Quota");
+      
+      if (isQuotaError && backupKey && backupKey !== apiKey) {
+        try {
+          console.log("Primary key quota exceeded, using backup key...");
+          const backupResponse = await generateWithKey(backupKey);
+          return res.status(200).json({ text: backupResponse.text });
+        } catch (backupError: any) {
+          console.error("Backup key also failed:", backupError);
+          const isBackupQuotaError = backupError.status === 429 || backupError.message?.includes("429") || backupError.message?.includes("Quota");
+          if (isBackupQuotaError) {
+             return res.status(429).json({ error: "무료 API 요청 한도를 초과했습니다. 1분 뒤에 다시 시도해주세요." });
+          }
+          throw backupError;
+        }
+      } else if (isQuotaError) {
+        return res.status(429).json({ error: "무료 API 요청 한도를 초과했습니다. 1분 뒤에 다시 시도해주세요." });
+      } else {
+        throw primaryError;
+      }
+    }
   } catch (error: any) {
     console.error("Gemini API Error:", error);
-    if (error.status === 429 || error.message?.includes("429") || error.message?.includes("Quota")) {
-      return res.status(429).json({ error: "무료 API 요청 한도를 초과했습니다. 1분 뒤에 다시 시도해주세요." });
-    }
     res.status(500).json({ error: "AI가 응답하지 못했습니다. API 키가 정확한지 확인해주세요." });
   }
 }

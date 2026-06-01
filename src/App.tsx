@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { useState, useRef, useEffect } from 'react';
-import { LayoutList, MessageSquare, Send, Loader2, BookPlus, Bot, Globe, Lock, Users, Trash2, CheckCircle2, LogOut } from 'lucide-react';
-import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { LayoutList, MessageSquare, Send, Loader2, BookPlus, Bot, Globe, Lock, Users, Trash2, CheckCircle2, LogOut, ChevronDown, ChevronUp } from 'lucide-react';
+import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, updateDoc, deleteDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { db } from './firebase';
 
 export default function App() {
@@ -28,7 +28,25 @@ export default function App() {
   const [isAgentLoading, setIsAgentLoading] = useState(false);
   const agentMessagesEndRef = useRef<HTMLDivElement>(null);
 
-  const [wikis, setWikis] = useState<{id: string, title: string, summary: string, content: string, keywords: string[], isShared?: boolean, author?: string}[]>([]);
+  const [wikis, setWikis] = useState<{id: string, title: string, summary: string, content: string, keywords: string[], isShared?: boolean, author?: string, comments?: {id: string, author: string, content: string, createdAt: number}[]}[]>([]);
+  const [commentInputs, setCommentInputs] = useState<{[wikiId: string]: string}>({});
+  const [expandedComments, setExpandedComments] = useState<{[wikiId: string]: boolean}>({});
+
+  const toggleComments = (wikiId: string) => {
+    setExpandedComments(prev => ({...prev, [wikiId]: !prev[wikiId]}));
+  };
+
+  const [agentTarget, setAgentTarget] = useState<string>("me");
+  
+  const handleAgentTargetChange = (target: string) => {
+    setAgentTarget(target);
+    setAgentMessages([
+      { role: 'ai', content: target === 'me' 
+        ? '안녕하세요! 저는 👤 개인 위키를 바탕으로 답변하는 **[IMa 전용 지식 에이전트]**입니다.\n\n저장된 문서 내용에 대해 궁금한 점을 질문해주세요. (위키에 없는 내용은 절대 답변하지 않습니다)' 
+        : `안녕하세요! 저는 **${target}**님의 지식을 대변하는 에이전트입니다.\n\n${target}님이 공유한 기여(팀 위키) 내용을 바탕으로 답변해 드립니다.` 
+      }
+    ]);
+  };
 
   // Firestore에서 실시간으로 위키 목록 가져오기
   useEffect(() => {
@@ -137,11 +155,19 @@ export default function App() {
     setIsAgentLoading(true);
 
     try {
+      const agentContext = agentTarget === 'me' 
+        ? myWikis 
+        : wikis.filter(w => w.isShared && w.author === agentTarget);
+
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // 나의 개인 위키 데이터를 배경 지식으로 전달 (RAG)
-        body: JSON.stringify({ message: userMsg, history: agentMessages, context: myWikis })
+        body: JSON.stringify({ 
+          message: userMsg, 
+          history: agentMessages, 
+          context: agentContext,
+          agentTargetName: agentTarget === 'me' ? nickname : agentTarget
+        })
       });
       const data = await res.json();
       
@@ -172,18 +198,57 @@ export default function App() {
   };
 
   const deleteWiki = async (id: string) => {
-    if (window.confirm("문서를 완전히 삭제하시겠습니까? (복구 불가)")) {
-      try {
-        await deleteDoc(doc(db, "wikis", id));
-      } catch (error) {
-        console.error("삭제 실패:", error);
-        alert("삭제에 실패했습니다.");
-      }
+    try {
+      await deleteDoc(doc(db, "wikis", id));
+    } catch (error) {
+      console.error("삭제 실패:", error);
+      alert("삭제에 실패했습니다.");
     }
+  };
+
+  const handleSubmitComment = async (wikiId: string) => {
+    const content = commentInputs[wikiId];
+    if (!content?.trim()) return;
+
+    try {
+      const wikiRef = doc(db, "wikis", wikiId);
+      await updateDoc(wikiRef, {
+        comments: arrayUnion({
+          id: Date.now().toString(),
+          author: nickname,
+          content: content.trim(),
+          createdAt: Date.now()
+        })
+      });
+      setCommentInputs(prev => ({...prev, [wikiId]: ""}));
+    } catch (error) {
+      console.error("댓글 작성 실패:", error);
+      alert("댓글 작성에 실패했습니다.");
+    }
+  };
+
+  const handleDeleteComment = async (wikiId: string, comment: any) => {
+    try {
+      const wikiRef = doc(db, "wikis", wikiId);
+      await updateDoc(wikiRef, {
+        comments: arrayRemove(comment)
+      });
+    } catch (error) {
+      console.error("댓글 삭제 실패:", error);
+      alert("댓글 삭제에 실패했습니다.");
+    }
+  };
+
+  const formatDate = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
   };
 
   // 현재 사용자가 작성한 위키만 필터링
   const myWikis = wikis.filter(w => w.author === nickname);
+  
+  // 팀에 공유된 다른 사람들의 닉네임 목록
+  const teamAuthors = Array.from(new Set(wikis.filter(w => w.isShared && w.author).map(w => w.author as string)));
 
   if (!nickname) {
     return (
@@ -513,6 +578,67 @@ export default function App() {
                           ))}
                         </div>
                       )}
+
+                      {/* Comments Section (댓글) */}
+                      <div className="mt-6 pt-5 border-t border-indigo-100 bg-slate-50/50 -mx-6 -mb-6 px-6 py-5">
+                        <button 
+                          onClick={() => toggleComments(wiki.id)}
+                          className="w-full flex items-center justify-between text-[13px] font-bold text-slate-700 mb-3 hover:text-indigo-600 transition-colors"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <MessageSquare size={14} className="text-indigo-500" /> 댓글 {wiki.comments?.length || 0}
+                          </div>
+                          {expandedComments[wiki.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                        </button>
+                        
+                        {expandedComments[wiki.id] && (
+                          <div className="animate-in fade-in slide-in-from-top-2 duration-300">
+                            <div className="space-y-3 mb-4 max-h-[250px] overflow-y-auto pr-2">
+                              {wiki.comments && wiki.comments.length > 0 ? (
+                                wiki.comments.map(comment => (
+                                  <div key={comment.id} className="text-[13.5px] border-b border-slate-200/60 pb-3 last:border-0 last:pb-0">
+                                    <div className="flex justify-between items-start mb-1 text-slate-500">
+                                      <div className="font-semibold text-slate-700 flex items-center gap-1.5">
+                                        {comment.author} 
+                                        <span className="text-[11px] font-normal text-slate-400">{formatDate(comment.createdAt)}</span>
+                                      </div>
+                                      <div>
+                                        {comment.author === nickname && (
+                                          <button onClick={() => handleDeleteComment(wiki.id, comment)} className="text-[11px] text-slate-400 hover:text-red-500 transition-colors mr-2">삭제</button>
+                                        )}
+                                        <button className="text-[11px] text-slate-400 hover:text-red-500 transition-colors" title="이 기능은 데모용입니다.">신고</button>
+                                      </div>
+                                    </div>
+                                    <div className="text-slate-700 whitespace-pre-wrap pl-0.5">
+                                      {comment.content}
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="text-[13px] text-slate-400 py-2">아직 댓글이 없습니다. 가벼운 코멘트를 남겨보세요!</div>
+                              )}
+                            </div>
+
+                            <div className="flex gap-2 relative">
+                              <input
+                                type="text"
+                                value={commentInputs[wiki.id] || ''}
+                                onChange={(e) => setCommentInputs(prev => ({...prev, [wiki.id]: e.target.value}))}
+                                onKeyDown={(e) => e.key === 'Enter' && handleSubmitComment(wiki.id)}
+                                placeholder="가벼운 코멘트를 남겨주세요."
+                                className="flex-1 bg-white border border-slate-300 text-slate-800 text-[13px] rounded-lg py-2.5 pl-3 pr-10 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all shadow-sm max-w-full"
+                              />
+                              <button 
+                                onClick={() => handleSubmitComment(wiki.id)}
+                                disabled={!commentInputs[wiki.id]?.trim()}
+                                className="absolute right-1 top-1 bottom-1 px-3 text-indigo-600 hover:bg-indigo-50 rounded-md disabled:opacity-30 disabled:hover:bg-transparent font-bold text-[13px] transition-colors"
+                              >
+                                등록
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -531,6 +657,29 @@ export default function App() {
 
         {activeTab === 'agent' && (
           <div className="flex-1 flex flex-col h-full bg-slate-50">
+            {/* Agent Selector */}
+            <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-3 overflow-x-auto shadow-sm relative z-0">
+              <span className="text-[13px] font-bold text-slate-700 mr-2 shrink-0">대화할 에이전트:</span>
+              <button
+                onClick={() => handleAgentTargetChange('me')}
+                className={`px-3 py-1.5 rounded-full text-[13px] font-bold transition-all whitespace-nowrap ${agentTarget === 'me' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200'}`}
+              >
+                나의 에이전트 👤
+              </button>
+              {teamAuthors.map(author => (
+                <button
+                  key={author}
+                  onClick={() => handleAgentTargetChange(author)}
+                  className={`px-3 py-1.5 rounded-full text-[13px] font-bold transition-all whitespace-nowrap ${agentTarget === author ? 'bg-[#27ae60] text-white shadow-md' : 'bg-white text-[#27ae60] border border-[#27ae60] hover:bg-green-50'}`}
+                >
+                  {author}의 에이전트 🧑‍💻
+                </button>
+              ))}
+              {teamAuthors.length === 0 && (
+                <span className="text-[12.5px] text-slate-400 font-medium ml-2">팀 기록에 공유한 팀원이 없습니다.</span>
+              )}
+            </div>
+
             {/* Database Sources Area */}
             <div className="bg-white border-b border-slate-200 px-6 py-4 shadow-sm z-10 w-full">
               <h3 className="text-sm font-bold text-slate-800 mb-2.5 flex items-center gap-2">
@@ -559,7 +708,7 @@ export default function App() {
             <div className="border-b border-slate-200 bg-white/90 p-3 z-10 w-full flex justify-between items-center backdrop-blur-md">
               <div className="font-bold text-slate-800 flex items-center gap-2 px-3">
                 <Bot size={20} className="text-indigo-600" />
-                나의 에이전트 (RAG)
+                {agentTarget === 'me' ? '나의 에이전트 (RAG)' : `${agentTarget}님의 에이전트 (RAG)`}
               </div>
               <div className="flex items-center gap-5 pr-3">
                 <div 
